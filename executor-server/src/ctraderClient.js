@@ -38,6 +38,11 @@ function toProtoVolume(units) {
   return Math.round(units * 100);
 }
 
+function toRelativePriceDistance(priceDistance) {
+  // cTrader Open API relative SL/TP for market orders is expressed in 1/100000 price units.
+  return Math.round(Math.abs(priceDistance) * 100000);
+}
+
 export class CTraderApiError extends Error {
   constructor(message, details = {}) {
     super(message);
@@ -225,11 +230,22 @@ export class CTraderOpenApiClient {
     });
   }
 
-  async placeMarketOrder({ requestKey, direction, stopLoss, takeProfit, symbolId, volumeUnits }) {
+  async placeMarketOrder({ requestKey, direction, entryPrice, stopLoss, takeProfit, symbolId, volumeUnits }) {
     await this.ensureReady();
 
     const side = direction === "LONG" ? TRADE_SIDE.BUY : TRADE_SIDE.SELL;
     const volume = toProtoVolume(volumeUnits);
+    // For market orders cTrader expects relative SL/TP distances, not absolute prices.
+    // Distances are derived from the planned strategy entry (provided by caller).
+    // Caller passes absolute stop/take; we convert to relative before submit.
+    // Actual fill may differ due to slippage, but this is accepted by cTrader and keeps protection attached.
+    if (!Number.isFinite(entryPrice)) {
+      throw new CTraderApiError("Market order requires entryPrice to compute relative SL/TP", {
+        code: "MISSING_ENTRY_PRICE",
+      });
+    }
+    const relativeStopLoss = toRelativePriceDistance(Number(entryPrice) - Number(stopLoss));
+    const relativeTakeProfit = toRelativePriceDistance(Number(takeProfit) - Number(entryPrice));
 
     const res = await this.request(
       PT.NEW_ORDER_REQ,
@@ -239,8 +255,8 @@ export class CTraderOpenApiClient {
         orderType: ORDER_TYPE.MARKET,
         tradeSide: side,
         volume,
-        stopLoss,
-        takeProfit,
+        relativeStopLoss,
+        relativeTakeProfit,
         label: `sig:${requestKey}`.slice(0, 45),
         comment: `supabase:${requestKey}`.slice(0, 100),
       },
@@ -253,6 +269,8 @@ export class CTraderOpenApiClient {
       executionType: body.executionType ?? null,
       orderId: body.order?.orderId ?? body.orderId ?? null,
       positionId: body.position?.positionId ?? body.positionId ?? null,
+      relativeStopLoss,
+      relativeTakeProfit,
       raw: res,
     };
   }

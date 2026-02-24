@@ -198,6 +198,7 @@ export class BrokerExecutor {
       const outcome = await this.ctraderClient.placeMarketOrder({
         requestKey: req.request_key,
         direction: req.direction,
+        entryPrice: Number(req.planned_entry_price),
         stopLoss: Number(req.stop_loss),
         takeProfit: Number(req.take_profit),
         symbolId: Number(this.config.ctrader.symbolId),
@@ -231,6 +232,10 @@ export class BrokerExecutor {
                   entryPriceForSizing: Number(riskSizing.entryPrice.toFixed(8)),
                 }
                 : {}),
+              ctraderProtection: {
+                relativeStopLoss: outcome.relativeStopLoss ?? null,
+                relativeTakeProfit: outcome.relativeTakeProfit ?? null,
+              },
             },
           },
           last_attempt_at: nowIso(),
@@ -247,7 +252,14 @@ export class BrokerExecutor {
         })
         .eq("signal_key", req.signal_key);
 
-      log("broker request sent", req.request_key, status, outcome.orderId);
+      log("broker request sent", {
+        requestKey: req.request_key,
+        status,
+        orderId: outcome.orderId,
+        positionId: outcome.positionId,
+        relativeStopLoss: outcome.relativeStopLoss ?? null,
+        relativeTakeProfit: outcome.relativeTakeProfit ?? null,
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const isCTraderError = e instanceof CTraderApiError;
