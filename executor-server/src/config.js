@@ -26,6 +26,15 @@ function optionalEnum(name, fallback, allowed) {
   return allowed.includes(raw) ? raw : fallback;
 }
 
+function requiredNumber(name) {
+  const raw = required(name);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid numeric env ${name}: ${raw}`);
+  }
+  return parsed;
+}
+
 export function getConfig() {
   const environment = process.env.CTRADER_ENVIRONMENT || "demo";
   const host = environment === "live"
@@ -62,8 +71,8 @@ export function getConfig() {
       clientSecret: required("CTRADER_APP_CLIENT_SECRET"),
       accessToken: required("CTRADER_ACCESS_TOKEN"),
       refreshToken: required("CTRADER_REFRESH_TOKEN"),
-      accountId: Number(required("CTRADER_ACCOUNT_ID")),
-      symbolId: Number(required("CTRADER_SYMBOL_ID")),
+      accountId: requiredNumber("CTRADER_ACCOUNT_ID"),
+      symbolId: requiredNumber("CTRADER_SYMBOL_ID"),
       volumeUnits: optionalNumber("CTRADER_ORDER_VOLUME_UNITS", 10000),
     },
   };

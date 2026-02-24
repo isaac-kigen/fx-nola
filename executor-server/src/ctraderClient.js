@@ -5,17 +5,17 @@ import { log } from "./logger.js";
 const PT = {
   HEARTBEAT_EVENT: 51,
   ERROR_RES: 2142,
-  APPLICATION_AUTH_REQ: 2104,
-  APPLICATION_AUTH_RES: 2105,
-  ACCOUNT_AUTH_REQ: 2107,
-  ACCOUNT_AUTH_RES: 2108,
+  APPLICATION_AUTH_REQ: 2100,
+  APPLICATION_AUTH_RES: 2101,
+  ACCOUNT_AUTH_REQ: 2102,
+  ACCOUNT_AUTH_RES: 2103,
   NEW_ORDER_REQ: 2106,
   EXECUTION_EVENT: 2126,
   ORDER_ERROR_EVENT: 2132,
   SYMBOLS_LIST_REQ: 2114,
   SYMBOLS_LIST_RES: 2115,
-  TRADER_REQ: 2118,
-  TRADER_RES: 2119,
+  TRADER_REQ: 2121,
+  TRADER_RES: 2122,
 };
 
 const ORDER_TYPE = {
@@ -171,11 +171,12 @@ export class CTraderOpenApiClient {
     if (key && this.pending.has(key)) {
       const pending = this.pending.get(key);
       this.pending.delete(key);
+      const payload = msg.payload ?? msg;
       if (msg.payloadType === PT.ERROR_RES || msg.payloadType === PT.ORDER_ERROR_EVENT) {
         pending.reject(new CTraderApiError(
-          msg.description || msg.errorCode || "cTrader error",
+          payload.description || payload.errorCode || "cTrader error",
           {
-            code: msg.errorCode || msg.code || null,
+            code: payload.errorCode || payload.code || null,
             payloadType: msg.payloadType,
             raw: msg,
           },
@@ -199,7 +200,11 @@ export class CTraderOpenApiClient {
 
   request(payloadType, payload, options = {}) {
     const clientMsgId = this.nextClientMsgId();
-    const frame = { payloadType, clientMsgId, ...payload };
+    const frame = {
+      payloadType,
+      clientMsgId,
+      ...(payload && Object.keys(payload).length > 0 ? { payload } : {}),
+    };
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(clientMsgId);
@@ -241,12 +246,13 @@ export class CTraderOpenApiClient {
       },
       { expectPayloadType: PT.EXECUTION_EVENT, timeoutMs: 20000 },
     );
+    const body = res.payload ?? res;
 
     return {
-      accepted: [EXEC_TYPE.ORDER_ACCEPTED, EXEC_TYPE.ORDER_FILLED].includes(Number(res.executionType)),
-      executionType: res.executionType ?? null,
-      orderId: res.order?.orderId ?? res.orderId ?? null,
-      positionId: res.position?.positionId ?? res.positionId ?? null,
+      accepted: [EXEC_TYPE.ORDER_ACCEPTED, EXEC_TYPE.ORDER_FILLED].includes(Number(body.executionType)),
+      executionType: body.executionType ?? null,
+      orderId: body.order?.orderId ?? body.orderId ?? null,
+      positionId: body.position?.positionId ?? body.positionId ?? null,
       raw: res,
     };
   }
@@ -259,7 +265,8 @@ export class CTraderOpenApiClient {
       { expectPayloadType: PT.TRADER_RES, timeoutMs: 15000 },
     );
 
-    const trader = res.trader ?? res;
+    const body = res.payload ?? res;
+    const trader = body.trader ?? body;
     return {
       balance: trader.balance != null ? Number(trader.balance) : null,
       equity: trader.equity != null ? Number(trader.equity) : null,
@@ -276,7 +283,8 @@ export class CTraderOpenApiClient {
       { expectPayloadType: PT.SYMBOLS_LIST_RES, timeoutMs: 20000 },
     );
 
-    const symbols = Array.isArray(res.symbol) ? res.symbol : (Array.isArray(res.symbols) ? res.symbols : []);
+    const body = res.payload ?? res;
+    const symbols = Array.isArray(body.symbol) ? body.symbol : (Array.isArray(body.symbols) ? body.symbols : []);
     return {
       count: symbols.length,
       symbols,
