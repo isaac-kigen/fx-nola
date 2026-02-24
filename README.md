@@ -12,9 +12,9 @@ This repo scaffolds a full Supabase-based signal engine for the EUR/USD M15 cont
 
 - `supabase/functions/m15-signal-engine/index.ts` - scheduled runtime entrypoint
 - `supabase/functions/_shared/strategy.ts` - mechanical strategy engine
-- `supabase/migrations/20260224_000001_init_signal_system.sql` - DB schema + cron helper
-- `supabase/migrations/20260224_000002_broker_execution_queue.sql` - cTrader broker order queue
-- `supabase/migrations/20260224_000003_render_executor_ping_helpers.sql` - optional Render keep-warm/tick cron helpers
+- `supabase/migrations/20260224000001_init_signal_system.sql` - DB schema + cron helper
+- `supabase/migrations/20260224000002_broker_execution_queue.sql` - cTrader broker order queue
+- `supabase/migrations/20260224000003_render_executor_ping_helpers.sql` - optional Render keep-warm/tick cron helpers
 - `executor-server/src/server.js` - Node executor service (polls queue and submits to cTrader Open API)
 - `supabase/.env.example` - Supabase Edge Function secrets/template
 - `executor-server/.env.example` - Render Node executor env template

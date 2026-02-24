@@ -38,6 +38,16 @@ function toProtoVolume(units) {
   return Math.round(units * 100);
 }
 
+export class CTraderApiError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "CTraderApiError";
+    this.code = details.code || null;
+    this.payloadType = details.payloadType || null;
+    this.raw = details.raw || null;
+  }
+}
+
 export class CTraderOpenApiClient {
   constructor(config) {
     this.config = config;
@@ -162,13 +172,24 @@ export class CTraderOpenApiClient {
       const pending = this.pending.get(key);
       this.pending.delete(key);
       if (msg.payloadType === PT.ERROR_RES || msg.payloadType === PT.ORDER_ERROR_EVENT) {
-        pending.reject(new Error(msg.description || msg.errorCode || "cTrader error"));
+        pending.reject(new CTraderApiError(
+          msg.description || msg.errorCode || "cTrader error",
+          {
+            code: msg.errorCode || msg.code || null,
+            payloadType: msg.payloadType,
+            raw: msg,
+          },
+        ));
         return;
       }
       if (pending.expectPayloadType && msg.payloadType !== pending.expectPayloadType && msg.payloadType !== PT.EXECUTION_EVENT) {
-        pending.reject(
-          new Error(`Unexpected payloadType ${msg.payloadType}, expected ${pending.expectPayloadType}`),
-        );
+        pending.reject(new CTraderApiError(
+          `Unexpected payloadType ${msg.payloadType}, expected ${pending.expectPayloadType}`,
+          {
+            payloadType: msg.payloadType,
+            raw: msg,
+          },
+        ));
         return;
       }
       pending.resolve(msg);
@@ -243,6 +264,22 @@ export class CTraderOpenApiClient {
       balance: trader.balance != null ? Number(trader.balance) : null,
       equity: trader.equity != null ? Number(trader.equity) : null,
       depositAssetId: trader.depositAssetId != null ? Number(trader.depositAssetId) : null,
+      raw: res,
+    };
+  }
+
+  async listSymbols() {
+    await this.ensureReady();
+    const res = await this.request(
+      PT.SYMBOLS_LIST_REQ,
+      { ctidTraderAccountId: this.config.accountId },
+      { expectPayloadType: PT.SYMBOLS_LIST_RES, timeoutMs: 20000 },
+    );
+
+    const symbols = Array.isArray(res.symbol) ? res.symbol : (Array.isArray(res.symbols) ? res.symbols : []);
+    return {
+      count: symbols.length,
+      symbols,
       raw: res,
     };
   }

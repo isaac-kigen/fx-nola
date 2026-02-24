@@ -1,4 +1,5 @@
 import { log, err } from "./logger.js";
+import { CTraderApiError } from "./ctraderClient.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -169,6 +170,31 @@ export class BrokerExecutor {
         volumeUnits = Number(riskSizing.units);
       }
 
+      log("submitting order", {
+        requestKey: req.request_key,
+        accountId: this.config.ctrader.accountId,
+        environment: this.config.ctrader.wsUrl.includes("demo") ? "demo" : "live",
+        symbol: req.symbol,
+        symbolId: this.config.ctrader.symbolId,
+        direction: req.direction,
+        plannedEntryTime: req.planned_entry_time,
+        plannedEntryPrice: req.planned_entry_price,
+        stopLoss: req.stop_loss,
+        takeProfit: req.take_profit,
+        volumeUnits,
+        riskSizing: riskSizing
+          ? {
+            reference: riskSizing.reference,
+            riskPercent: riskSizing.riskPercent,
+            accountValue: Number(riskSizing.accountValue.toFixed(2)),
+            riskBudget: Number(riskSizing.riskBudget.toFixed(2)),
+            effectiveRiskBudget: Number(riskSizing.effectiveRiskBudget.toFixed(2)),
+            projectedRisk: Number(riskSizing.projectedRisk.toFixed(2)),
+            stopDistance: Number(riskSizing.stopDistance.toFixed(8)),
+          }
+          : null,
+      });
+
       const outcome = await this.ctraderClient.placeMarketOrder({
         requestKey: req.request_key,
         direction: req.direction,
@@ -224,7 +250,21 @@ export class BrokerExecutor {
       log("broker request sent", req.request_key, status, outcome.orderId);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      err("broker request failed", req.request_key, msg);
+      const isCTraderError = e instanceof CTraderApiError;
+      const brokerErrorCode = isCTraderError ? (e.code ?? null) : null;
+      const errorPayloadType = isCTraderError ? (e.payloadType ?? null) : null;
+      const rawError = isCTraderError ? (e.raw ?? null) : null;
+
+      err("broker request failed", {
+        requestKey: req.request_key,
+        accountId: this.config.ctrader.accountId,
+        symbolId: this.config.ctrader.symbolId,
+        message: msg,
+        brokerErrorCode,
+        payloadType: errorPayloadType,
+        rawError,
+      });
+
       const backoffMins = Math.min(30, Math.max(1, (req.attempts || 0) + 1));
       const next = new Date(Date.now() + backoffMins * 60_000).toISOString();
       const { error } = await this.supabase
@@ -233,7 +273,20 @@ export class BrokerExecutor {
           status: "failed",
           last_attempt_at: nowIso(),
           next_attempt_after: next,
+          broker_error_code: brokerErrorCode,
           broker_error_message: msg,
+          execution_event: rawError,
+          payload: {
+            ...(req.payload || {}),
+            lastFailure: {
+              message: msg,
+              brokerErrorCode,
+              payloadType: errorPayloadType,
+              accountId: this.config.ctrader.accountId,
+              symbolId: this.config.ctrader.symbolId,
+              at: nowIso(),
+            },
+          },
         })
         .eq("id", req.id);
       if (error) throw error;

@@ -53,6 +53,54 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, reconnected: true });
     }
 
+    if (req.method === "GET" && req.url === "/debug/account") {
+      if (config.webhookSecret) {
+        const secret = req.headers["x-executor-secret"];
+        if (secret !== config.webhookSecret) {
+          return sendJson(res, 401, { ok: false, error: "Unauthorized" });
+        }
+      }
+      const snapshot = await ctraderClient.getTraderSnapshot();
+      return sendJson(res, 200, {
+        ok: true,
+        accountId: config.ctrader.accountId,
+        wsUrl: config.ctrader.wsUrl,
+        symbolId: config.ctrader.symbolId,
+        trader: snapshot,
+      });
+    }
+
+    if (req.method === "GET" && req.url.startsWith("/debug/symbols")) {
+      if (config.webhookSecret) {
+        const secret = req.headers["x-executor-secret"];
+        if (secret !== config.webhookSecret) {
+          return sendJson(res, 401, { ok: false, error: "Unauthorized" });
+        }
+      }
+      const u = new URL(req.url, `http://${req.headers.host}`);
+      const q = (u.searchParams.get("q") || "").toUpperCase();
+      const result = await ctraderClient.listSymbols();
+      const mapped = (result.symbols || []).map((s) => ({
+        symbolId: s.symbolId ?? s.id ?? null,
+        symbolName: s.symbolName ?? s.name ?? null,
+        description: s.description ?? null,
+        baseAssetId: s.baseAssetId ?? null,
+        quoteAssetId: s.quoteAssetId ?? null,
+      }));
+      const filtered = q
+        ? mapped.filter((s) =>
+          String(s.symbolName || "").toUpperCase().includes(q) ||
+          String(s.description || "").toUpperCase().includes(q)
+        )
+        : mapped;
+      return sendJson(res, 200, {
+        ok: true,
+        accountId: config.ctrader.accountId,
+        count: filtered.length,
+        items: filtered.slice(0, 200),
+      });
+    }
+
     if (req.method === "POST" && req.url === "/webhook/queued") {
       if (config.webhookSecret) {
         const secret = req.headers["x-executor-secret"];
