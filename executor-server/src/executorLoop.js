@@ -108,6 +108,22 @@ async function computeSizedVolumeUnits({ req, ctraderClient, config }) {
   };
 }
 
+async function sendTelegram(config, text) {
+  if (!config.telegram?.botToken || !config.telegram?.chatId) return false;
+  const url = `https://api.telegram.org/bot${config.telegram.botToken}/sendMessage`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: config.telegram.chatId,
+      text,
+      parse_mode: "Markdown",
+      disable_web_page_preview: true,
+    }),
+  });
+  return res.ok;
+}
+
 export class BrokerExecutor {
   constructor({ supabase, ctraderClient, config }) {
     this.supabase = supabase;
@@ -206,6 +222,7 @@ export class BrokerExecutor {
       });
 
       const status = outcome.accepted ? "accepted" : "submitted";
+      const executedAt = nowIso();
       const { error } = await this.supabase
         .from("broker_order_requests")
         .update({
@@ -238,7 +255,8 @@ export class BrokerExecutor {
               },
             },
           },
-          last_attempt_at: nowIso(),
+          last_attempt_at: executedAt,
+          telegram_executed_notified_at: null,
           broker_error_code: null,
           broker_error_message: null,
         })
@@ -260,6 +278,21 @@ export class BrokerExecutor {
         relativeStopLoss: outcome.relativeStopLoss ?? null,
         relativeTakeProfit: outcome.relativeTakeProfit ?? null,
       });
+
+      const tgSent = await sendTelegram(this.config, [
+        `🚀 *Trade Executed*`,
+        `Direction: *${req.direction}*`,
+        `Entry: \`${req.planned_entry_price ?? "-"}\``,
+        `SL/TP: \`${req.stop_loss}\` / \`${req.take_profit}\``,
+        `Order/Position: \`${outcome.orderId ?? "-"}\` / \`${outcome.positionId ?? "-"}\``,
+        `Signal ID: \`${req.signal_key}\``,
+      ].join("\n"));
+      if (tgSent) {
+        await this.supabase
+          .from("broker_order_requests")
+          .update({ telegram_executed_notified_at: nowIso() })
+          .eq("id", req.id);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const isCTraderError = e instanceof CTraderApiError;

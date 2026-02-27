@@ -46,6 +46,10 @@ export function getConfig() {
     webhookSecret: process.env.EXECUTOR_WEBHOOK_SECRET || "",
     supabaseUrl: required("SUPABASE_URL"),
     supabaseServiceRoleKey: required("SUPABASE_SERVICE_ROLE_KEY"),
+    telegram: {
+      botToken: process.env.TELEGRAM_BOT_TOKEN || "",
+      chatId: process.env.TELEGRAM_CHAT_ID || "",
+    },
     pollIntervalMs: optionalInt("CTRADER_POLL_INTERVAL_MS", 5000),
     risk: {
       positionSizingMode: optionalEnum(

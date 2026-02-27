@@ -1,6 +1,8 @@
 import type {
   Candle,
+  EngineEvent,
   EngineRunResult,
+  EngineRuntimeSnapshot,
   EngineSignal,
   EngineTrade,
   Fractal,
@@ -85,6 +87,12 @@ function buildTradeKey(signalKey: string): string {
   return `${signalKey}:trade`;
 }
 
+function computeBias(state: State): "BULLISH" | "BEARISH" | "NEUTRAL" {
+  if (state.startsWith("BEAR")) return "BEARISH";
+  if (state.startsWith("BULL")) return "BULLISH";
+  return "NEUTRAL";
+}
+
 export function runContinuationStrategy(params: {
   symbol: string;
   timeframe: string;
@@ -93,22 +101,21 @@ export function runContinuationStrategy(params: {
   const { symbol, timeframe, candles } = params;
   const signals: EngineSignal[] = [];
   const trades: EngineTrade[] = [];
-
-  if (candles.length < 5) return { signals, trades };
+  const events: EngineEvent[] = [];
 
   let state: State = "WAIT_SWING_BOS";
   let tradeRuntime: OpenTradeRuntime | null = null;
 
   const confirmedFractals: Fractal[] = [];
-
   let lastFSH: Fractal | null = null;
   let lastFSL: Fractal | null = null;
 
   // Cycle runtime
   let tBos = -1;
-  let anchorLine = 0; // B_line for shorts, A_line for longs
+  let anchorLine = 0;
   let anchorIndex = -1;
-  let causalExtreme = 0; // H for shorts, L for longs
+  let causalExtreme = 0;
+  let causalExtremeIndex = -1;
   let pbLevel = 0;
   let impulsePips = 0;
   let pullbackStartIndex = -1;
@@ -124,6 +131,7 @@ export function runContinuationStrategy(params: {
     anchorLine = 0;
     anchorIndex = -1;
     causalExtreme = 0;
+    causalExtremeIndex = -1;
     pbLevel = 0;
     impulsePips = 0;
     pullbackStartIndex = -1;
@@ -132,6 +140,74 @@ export function runContinuationStrategy(params: {
     pbHigh = Number.NEGATIVE_INFINITY;
     sLow = Number.NaN;
     sHigh = Number.NaN;
+  }
+
+  function startBearCycleFromBosDown(t: number, bLine: number, bIndex: number): boolean {
+    tBos = t;
+    anchorLine = bLine;
+    anchorIndex = bIndex;
+    let h = -Infinity;
+    let hIndex = bIndex;
+    for (let k = bIndex; k <= t; k++) {
+      if (candles[k].high > h) {
+        h = candles[k].high;
+        hIndex = k;
+      }
+    }
+    causalExtreme = h;
+    causalExtremeIndex = hIndex;
+    const d = h - bLine;
+    if (d < D_MIN) {
+      events.push({
+        type: "CYCLE_DISCARDED",
+        at: candles[t].ts,
+        direction: "SHORT",
+        impulsePips: roundPips(d / PIP),
+        minImpulsePips: roundPips(D_MIN / PIP),
+      });
+      resetCycle();
+      return false;
+    }
+    impulsePips = roundPips(d / PIP);
+    pbLevel = (bLine + h) / 2;
+    pbLow = Number.POSITIVE_INFINITY;
+    sLow = Number.NaN;
+    state = "BEAR_WAIT_PULLBACK_START";
+    return true;
+  }
+
+  function startBullCycleFromBosUp(t: number, aLine: number, aIndex: number): boolean {
+    tBos = t;
+    anchorLine = aLine;
+    anchorIndex = aIndex;
+    let l = Infinity;
+    let lIndex = aIndex;
+    for (let k = aIndex; k <= t; k++) {
+      if (candles[k].low < l) {
+        l = candles[k].low;
+        lIndex = k;
+      }
+    }
+    causalExtreme = l;
+    causalExtremeIndex = lIndex;
+    const d = aLine - l;
+    if (d < D_MIN) {
+      events.push({
+        type: "CYCLE_DISCARDED",
+        at: candles[t].ts,
+        direction: "LONG",
+        impulsePips: roundPips(d / PIP),
+        minImpulsePips: roundPips(D_MIN / PIP),
+      });
+      resetCycle();
+      return false;
+    }
+    impulsePips = roundPips(d / PIP);
+    pbLevel = (aLine + l) / 2;
+    pbHigh = Number.NEGATIVE_INFINITY;
+    sHigh = Number.NaN;
+    state = "BULL_WAIT_PULLBACK_START";
+    return true;
   }
 
   function simulateOpenTradeAtCandle(t: number): void {
@@ -151,7 +227,7 @@ export function runContinuationStrategy(params: {
       tr.exitPrice = slFirst ? tr.stopLoss : tr.takeProfit;
       tr.exitReason = slFirst ? "SL" : "TP";
       const risk = tr.entryPrice - tr.stopLoss;
-      const reward = (tr.exitPrice - tr.entryPrice);
+      const reward = tr.exitPrice - tr.entryPrice;
       tr.rMultiple = risk > 0 ? roundPips(reward / risk) : null;
       tr.status = "CLOSED";
       tradeRuntime = null;
@@ -167,7 +243,7 @@ export function runContinuationStrategy(params: {
     tr.exitPrice = slFirst ? tr.stopLoss : tr.takeProfit;
     tr.exitReason = slFirst ? "SL" : "TP";
     const risk = tr.stopLoss - tr.entryPrice;
-    const reward = (tr.entryPrice - (tr.exitPrice ?? tr.entryPrice));
+    const reward = tr.entryPrice - (tr.exitPrice ?? tr.entryPrice);
     tr.rMultiple = risk > 0 ? roundPips(reward / risk) : null;
     tr.status = "CLOSED";
     tradeRuntime = null;
@@ -175,7 +251,6 @@ export function runContinuationStrategy(params: {
   }
 
   for (let t = 0; t < candles.length; t++) {
-    // Confirm fractal at pivot (t-1) after candle t closes.
     const fractal = confirmFractalAt(candles, t - 1);
     if (fractal && fractal.confirmedAtIndex === t) {
       confirmedFractals.push(fractal);
@@ -185,10 +260,7 @@ export function runContinuationStrategy(params: {
 
     if (state === "IN_TRADE") {
       simulateOpenTradeAtCandle(t);
-      if (state === "IN_TRADE") {
-        continue;
-      }
-      // If trade closed on this candle we intentionally continue processing same candle in WAIT_SWING_BOS.
+      if (state === "IN_TRADE") continue;
     }
 
     const c = candles[t];
@@ -196,44 +268,11 @@ export function runContinuationStrategy(params: {
     switch (state) {
       case "WAIT_SWING_BOS": {
         if (lastFSL && c.close < lastFSL.price) {
-          // Swing BOS Down
-          tBos = t;
-          anchorLine = lastFSL.price;
-          anchorIndex = lastFSL.index;
-          let h = -Infinity;
-          for (let k = anchorIndex; k <= t; k++) h = Math.max(h, candles[k].high);
-          causalExtreme = h;
-          const d = h - anchorLine;
-          if (d < D_MIN) {
-            resetCycle();
-            break;
-          }
-          impulsePips = roundPips(d / PIP);
-          pbLevel = (anchorLine + h) / 2;
-          pbLow = Number.POSITIVE_INFINITY;
-          sLow = Number.NaN;
-          state = "BEAR_WAIT_PULLBACK_START";
+          startBearCycleFromBosDown(t, lastFSL.price, lastFSL.index);
           break;
         }
-
         if (lastFSH && c.close > lastFSH.price) {
-          // Swing BOS Up
-          tBos = t;
-          anchorLine = lastFSH.price;
-          anchorIndex = lastFSH.index;
-          let l = Infinity;
-          for (let k = anchorIndex; k <= t; k++) l = Math.min(l, candles[k].low);
-          causalExtreme = l;
-          const d = anchorLine - l;
-          if (d < D_MIN) {
-            resetCycle();
-            break;
-          }
-          impulsePips = roundPips(d / PIP);
-          pbLevel = (anchorLine + l) / 2;
-          pbHigh = Number.NEGATIVE_INFINITY;
-          sHigh = Number.NaN;
-          state = "BULL_WAIT_PULLBACK_START";
+          startBullCycleFromBosUp(t, lastFSH.price, lastFSH.index);
         }
         break;
       }
@@ -258,8 +297,15 @@ export function runContinuationStrategy(params: {
       }
 
       case "BEAR_WAIT_CONTINUATION_TRIGGER": {
-        if (c.close > causalExtreme) {
-          resetCycle();
+        if (c.close > causalExtreme && causalExtremeIndex >= 0) {
+          events.push({
+            type: "STRUCTURE_FLIP",
+            at: c.ts,
+            from: "BEARISH",
+            to: "BULLISH",
+            reason: "Close above bearish causal extreme (H)",
+          });
+          startBullCycleFromBosUp(t, causalExtreme, causalExtremeIndex);
           break;
         }
         if (!lastFSL || c.close >= lastFSL.price) break;
@@ -302,9 +348,7 @@ export function runContinuationStrategy(params: {
             pullbackStartToConfirmCandles: pullbackConfirmIndex - pullbackStartIndex,
             confirmToTriggerCandles: t - pullbackConfirmIndex,
           },
-          payload: {
-            stateMachine: "BEAR",
-          },
+          payload: { stateMachine: "BEAR" },
         };
         signals.push(signal);
 
@@ -355,8 +399,15 @@ export function runContinuationStrategy(params: {
       }
 
       case "BULL_WAIT_CONTINUATION_TRIGGER": {
-        if (c.close < causalExtreme) {
-          resetCycle();
+        if (c.close < causalExtreme && causalExtremeIndex >= 0) {
+          events.push({
+            type: "STRUCTURE_FLIP",
+            at: c.ts,
+            from: "BULLISH",
+            to: "BEARISH",
+            reason: "Close below bullish causal extreme (L)",
+          });
+          startBearCycleFromBosDown(t, causalExtreme, causalExtremeIndex);
           break;
         }
         if (!lastFSH || c.close <= lastFSH.price) break;
@@ -399,9 +450,7 @@ export function runContinuationStrategy(params: {
             pullbackStartToConfirmCandles: pullbackConfirmIndex - pullbackStartIndex,
             confirmToTriggerCandles: t - pullbackConfirmIndex,
           },
-          payload: {
-            stateMachine: "BULL",
-          },
+          payload: { stateMachine: "BULL" },
         };
         signals.push(signal);
 
@@ -432,12 +481,37 @@ export function runContinuationStrategy(params: {
         break;
       }
 
-      case "IN_TRADE": {
-        // handled above
+      case "IN_TRADE":
         break;
-      }
     }
   }
 
-  return { signals, trades };
+  const lastCandleTs = candles.length > 0 ? candles[candles.length - 1].ts : null;
+  const runtime: EngineRuntimeSnapshot = {
+    strategyCode: STRATEGY_CODE,
+    symbol,
+    timeframe,
+    bias: state === "IN_TRADE"
+      ? (tradeRuntime?.signal.direction === "LONG" ? "BULLISH" : "BEARISH")
+      : computeBias(state),
+    state,
+    lastCandleTs,
+    lastFSHPrice: lastFSH ? roundPx(lastFSH.price) : null,
+    lastFSLPrice: lastFSL ? roundPx(lastFSL.price) : null,
+    anchorLine: anchorIndex >= 0 ? roundPx(anchorLine) : null,
+    anchorIndex: anchorIndex >= 0 ? anchorIndex : null,
+    causalExtreme: causalExtremeIndex >= 0 ? roundPx(causalExtreme) : null,
+    causalExtremeIndex: causalExtremeIndex >= 0 ? causalExtremeIndex : null,
+    midpointLevel: anchorIndex >= 0 ? roundPx(pbLevel) : null,
+    impulsePips: anchorIndex >= 0 ? impulsePips : null,
+    pullbackStartIndex: pullbackStartIndex >= 0 ? pullbackStartIndex : null,
+    pullbackConfirmIndex: pullbackConfirmIndex >= 0 ? pullbackConfirmIndex : null,
+    pbLow: Number.isFinite(pbLow) ? roundPx(pbLow) : null,
+    pbHigh: Number.isFinite(pbHigh) ? roundPx(pbHigh) : null,
+    sLow: Number.isFinite(sLow) ? roundPx(sLow) : null,
+    sHigh: Number.isFinite(sHigh) ? roundPx(sHigh) : null,
+    activeTradeKey: tradeRuntime?.trade.tradeKey ?? null,
+  };
+
+  return { signals, trades, runtime, events };
 }

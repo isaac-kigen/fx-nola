@@ -12,6 +12,8 @@ export type RuntimeEnv = {
   executorBaseUrl: string | null;
   executorWebhookSecret: string | null;
   ctraderOrderVolumeUnits: number;
+  telegramAllowedChatIds: string[];
+  telegramWebhookSecret: string | null;
 };
 
 function required(name: string): string {
@@ -31,6 +33,8 @@ function optionalInt(name: string, fallback: number): number {
 }
 
 export function getEnv(): RuntimeEnv {
+  const allowedRaw = Deno.env.get("TELEGRAM_ALLOWED_CHAT_IDS") ?? (Deno.env.get("TELEGRAM_CHAT_ID") ?? "");
+  const telegramAllowedChatIds = allowedRaw.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
   return {
     supabaseUrl: required("SUPABASE_URL"),
     supabaseServiceRoleKey: required("SUPABASE_SERVICE_ROLE_KEY"),
@@ -45,5 +49,7 @@ export function getEnv(): RuntimeEnv {
     executorBaseUrl: Deno.env.get("EXECUTOR_BASE_URL"),
     executorWebhookSecret: Deno.env.get("EXECUTOR_WEBHOOK_SECRET"),
     ctraderOrderVolumeUnits: optionalInt("CTRADER_ORDER_VOLUME_UNITS", 10000),
+    telegramAllowedChatIds,
+    telegramWebhookSecret: Deno.env.get("TELEGRAM_WEBHOOK_SECRET"),
   };
 }

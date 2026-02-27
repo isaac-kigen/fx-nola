@@ -3,8 +3,17 @@ import { getEnv } from "../_shared/env.ts";
 import { createSupabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { fetchTwelveDataCandles } from "../_shared/twelveData.ts";
 import { sendTelegramMessage } from "../_shared/telegram.ts";
+import {
+  formatCycleDiscarded,
+  formatSignalDetected,
+  formatStructureFlip,
+  formatTradeClosedSL,
+  formatTradeClosedTP,
+} from "../_shared/telegramTemplates.ts";
 import { runContinuationStrategy } from "../_shared/strategy.ts";
-import type { Candle, EngineSignal, EngineTrade } from "../_shared/types.ts";
+import type { Candle, EngineEvent, EngineRuntimeSnapshot, EngineSignal, EngineTrade } from "../_shared/types.ts";
+
+const STRATEGY_CODE = "eurusd_m15_continuation_v1";
 
 function json(status: number, body: unknown) {
   return new Response(JSON.stringify(body, null, 2), {
@@ -77,18 +86,33 @@ function tradeRow(t: EngineTrade) {
   };
 }
 
-function formatSignalTelegram(s: Record<string, unknown>): string {
-  const dir = String(s.direction ?? "");
-  return [
-    `*EURUSD M15 Signal*`,
-    `Direction: *${dir}*`,
-    `Trigger: \`${s.trigger_time}\``,
-    `Entry: ${s.entry_status === "pending_next_open" ? "*Next candle open (pending)*" : `\`${s.planned_entry_price}\` @ \`${s.planned_entry_time}\``}`,
-    `SL: \`${s.stop_loss}\``,
-    `TP: \`${s.take_profit}\``,
-    `Impulse: \`${s.impulse_pips}\` pips`,
-    `Key: \`${s.signal_key}\``,
-  ].join("\n");
+function runtimeRow(runtime: EngineRuntimeSnapshot, events: EngineEvent[]) {
+  return {
+    strategy_code: runtime.strategyCode,
+    symbol: runtime.symbol,
+    timeframe: runtime.timeframe,
+    bias: runtime.bias,
+    state: runtime.state,
+    last_candle_ts: runtime.lastCandleTs,
+    last_fsh_price: runtime.lastFSHPrice,
+    last_fsl_price: runtime.lastFSLPrice,
+    anchor_line: runtime.anchorLine,
+    anchor_index: runtime.anchorIndex,
+    causal_extreme: runtime.causalExtreme,
+    causal_extreme_index: runtime.causalExtremeIndex,
+    midpoint_level: runtime.midpointLevel,
+    impulse_pips: runtime.impulsePips,
+    pullback_start_index: runtime.pullbackStartIndex,
+    pullback_confirm_index: runtime.pullbackConfirmIndex,
+    pb_low: runtime.pbLow,
+    pb_high: runtime.pbHigh,
+    s_low: runtime.sLow,
+    s_high: runtime.sHigh,
+    active_trade_key: runtime.activeTradeKey,
+    payload: {
+      events: events.slice(-20),
+    },
+  };
 }
 
 function brokerRequestRow(s: EngineSignal, requestedUnits: number) {
@@ -133,13 +157,42 @@ async function triggerExecutorWebhook(baseUrl: string, secret: string | null) {
 serve(async (req) => {
   try {
     const env = getEnv();
-
     const authHeader = req.headers.get("x-cron-secret");
     if (authHeader !== env.cronSecret) {
       return json(401, { error: "Unauthorized" });
     }
 
     const supabase = createSupabaseAdmin(env);
+
+    const { data: controlRow, error: controlErr } = await supabase
+      .from("strategy_controls")
+      .select("*")
+      .eq("strategy_code", STRATEGY_CODE)
+      .eq("symbol", env.signalSymbol)
+      .eq("timeframe", env.signalTimeframe)
+      .maybeSingle();
+    if (controlErr) throw controlErr;
+
+    let resetApplied = false;
+    if (controlRow?.reset_requested === true) {
+      resetApplied = true;
+      const { error: resetErr } = await supabase
+        .from("strategy_controls")
+        .upsert({
+          strategy_code: STRATEGY_CODE,
+          symbol: env.signalSymbol,
+          timeframe: env.signalTimeframe,
+          reset_requested: false,
+        }, { onConflict: "strategy_code,symbol,timeframe" });
+      if (resetErr) throw resetErr;
+
+      await supabase
+        .from("strategy_runtime_state")
+        .delete()
+        .eq("strategy_code", STRATEGY_CODE)
+        .eq("symbol", env.signalSymbol)
+        .eq("timeframe", env.signalTimeframe);
+    }
 
     const fetched = await fetchTwelveDataCandles({
       apiKey: env.twelveDataApiKey,
@@ -156,10 +209,7 @@ serve(async (req) => {
     const upsertCandlesRes = await supabase
       .from("market_candles")
       .upsert(candleRows, { onConflict: "symbol,timeframe,ts" });
-
-    if (upsertCandlesRes.error) {
-      throw upsertCandlesRes.error;
-    }
+    if (upsertCandlesRes.error) throw upsertCandlesRes.error;
 
     const { data: dbCandles, error: dbCandleErr } = await supabase
       .from("market_candles")
@@ -168,7 +218,6 @@ serve(async (req) => {
       .eq("timeframe", env.signalTimeframe)
       .order("ts", { ascending: false })
       .limit(env.signalLookbackCandles);
-
     if (dbCandleErr) throw dbCandleErr;
     if (!dbCandles || dbCandles.length < 5) {
       return json(200, { ok: true, candlesStored: candleRows.length, message: "Insufficient candles" });
@@ -190,6 +239,11 @@ serve(async (req) => {
       timeframe: env.signalTimeframe,
       candles,
     });
+
+    const { error: runtimeErr } = await supabase
+      .from("strategy_runtime_state")
+      .upsert(runtimeRow(engine.runtime, engine.events), { onConflict: "strategy_code,symbol,timeframe" });
+    if (runtimeErr) throw runtimeErr;
 
     if (engine.signals.length > 0) {
       const { error } = await supabase
@@ -220,6 +274,26 @@ serve(async (req) => {
       await triggerExecutorWebhook(env.executorBaseUrl, env.executorWebhookSecret);
     }
 
+    let eventNotifications = 0;
+    for (const event of engine.events) {
+      if (event.type === "STRUCTURE_FLIP") {
+        await sendTelegramMessage({
+          botToken: env.telegramBotToken,
+          chatId: env.telegramChatId,
+          text: formatStructureFlip(event),
+        });
+        eventNotifications++;
+      }
+      if (event.type === "CYCLE_DISCARDED") {
+        await sendTelegramMessage({
+          botToken: env.telegramBotToken,
+          chatId: env.telegramChatId,
+          text: formatCycleDiscarded(event),
+        });
+        eventNotifications++;
+      }
+    }
+
     const { data: unsentSignals, error: unsentErr } = await supabase
       .from("strategy_signals")
       .select("*")
@@ -230,19 +304,74 @@ serve(async (req) => {
       .limit(20);
     if (unsentErr) throw unsentErr;
 
-    let notified = 0;
+    let signalNotified = 0;
     for (const s of unsentSignals ?? []) {
       await sendTelegramMessage({
         botToken: env.telegramBotToken,
         chatId: env.telegramChatId,
-        text: formatSignalTelegram(s as Record<string, unknown>),
+        text: formatSignalDetected({
+          direction: String(s.direction) as "LONG" | "SHORT",
+          symbol: String(s.symbol),
+          timeframe: String(s.timeframe),
+          triggerTime: String(s.trigger_time),
+          plannedEntryTime: s.planned_entry_time ? String(s.planned_entry_time) : null,
+          plannedEntryPrice: s.planned_entry_price == null ? null : Number(s.planned_entry_price),
+          stopLoss: Number(s.stop_loss),
+          takeProfit: Number(s.take_profit),
+          impulsePips: Number(s.impulse_pips),
+          pbLevel: Number(s.pb_level),
+          signalKey: String(s.signal_key),
+        }),
       });
       const { error } = await supabase
         .from("strategy_signals")
         .update({ telegram_notified_at: new Date().toISOString(), status: "notified" })
         .eq("signal_key", s.signal_key);
       if (error) throw error;
-      notified++;
+      signalNotified++;
+    }
+
+    const { data: unclosedNotifiedTrades, error: closedErr } = await supabase
+      .from("strategy_trades")
+      .select("*")
+      .eq("symbol", env.signalSymbol)
+      .eq("timeframe", env.signalTimeframe)
+      .eq("status", "CLOSED")
+      .is("telegram_close_notified_at", null)
+      .order("updated_at", { ascending: true })
+      .limit(20);
+    if (closedErr) throw closedErr;
+
+    let closeNotified = 0;
+    for (const t of unclosedNotifiedTrades ?? []) {
+      if (t.exit_reason === "TP") {
+        await sendTelegramMessage({
+          botToken: env.telegramBotToken,
+          chatId: env.telegramChatId,
+          text: formatTradeClosedTP({
+            signalKey: String(t.signal_key),
+            exitTime: t.exit_time ? String(t.exit_time) : null,
+            exitPrice: t.exit_price == null ? null : Number(t.exit_price),
+            rMultiple: t.r_multiple == null ? null : Number(t.r_multiple),
+          }),
+        });
+      } else {
+        await sendTelegramMessage({
+          botToken: env.telegramBotToken,
+          chatId: env.telegramChatId,
+          text: formatTradeClosedSL({
+            signalKey: String(t.signal_key),
+            exitTime: t.exit_time ? String(t.exit_time) : null,
+            exitPrice: t.exit_price == null ? null : Number(t.exit_price),
+            rMultiple: t.r_multiple == null ? null : Number(t.r_multiple),
+          }),
+        });
+      }
+      await supabase
+        .from("strategy_trades")
+        .update({ telegram_close_notified_at: new Date().toISOString() })
+        .eq("trade_key", t.trade_key);
+      closeNotified++;
     }
 
     return json(200, {
@@ -253,7 +382,10 @@ serve(async (req) => {
       computedSignals: engine.signals.length,
       computedTrades: engine.trades.length,
       queuedBrokerRequests: readySignals.length,
-      telegramNotified: notified,
+      signalTelegramNotified: signalNotified,
+      eventTelegramNotified: eventNotifications,
+      tradeCloseTelegramNotified: closeNotified,
+      resetApplied,
       latestCandle: candles[candles.length - 1]?.ts ?? null,
     });
   } catch (error) {

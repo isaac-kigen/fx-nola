@@ -2,6 +2,9 @@ export async function sendTelegramMessage(params: {
   botToken: string;
   chatId: string;
   text: string;
+  parseMode?: "Markdown" | "MarkdownV2" | "HTML";
+  disableWebPagePreview?: boolean;
+  replyMarkup?: Record<string, unknown>;
 }): Promise<void> {
   const url = `https://api.telegram.org/bot${params.botToken}/sendMessage`;
   const res = await fetch(url, {
@@ -10,8 +13,9 @@ export async function sendTelegramMessage(params: {
     body: JSON.stringify({
       chat_id: params.chatId,
       text: params.text,
-      parse_mode: "Markdown",
-      disable_web_page_preview: true,
+      parse_mode: params.parseMode ?? "Markdown",
+      disable_web_page_preview: params.disableWebPagePreview ?? true,
+      ...(params.replyMarkup ? { reply_markup: params.replyMarkup } : {}),
     }),
   });
 

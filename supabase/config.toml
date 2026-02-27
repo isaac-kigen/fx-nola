@@ -2,3 +2,6 @@ project_id = "your-project-ref"
 
 [functions.m15-signal-engine]
 verify_jwt = false
+
+[functions.telegram-bot]
+verify_jwt = false

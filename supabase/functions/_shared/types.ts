@@ -68,4 +68,54 @@ export type EngineTrade = {
 export type EngineRunResult = {
   signals: EngineSignal[];
   trades: EngineTrade[];
+  runtime: EngineRuntimeSnapshot;
+  events: EngineEvent[];
 };
+
+export type EngineRuntimeSnapshot = {
+  strategyCode: string;
+  symbol: string;
+  timeframe: string;
+  bias: "BULLISH" | "BEARISH" | "NEUTRAL";
+  state:
+    | "WAIT_SWING_BOS"
+    | "BEAR_WAIT_PULLBACK_START"
+    | "BEAR_TRACK_PULLBACK"
+    | "BEAR_WAIT_CONTINUATION_TRIGGER"
+    | "BULL_WAIT_PULLBACK_START"
+    | "BULL_TRACK_PULLBACK"
+    | "BULL_WAIT_CONTINUATION_TRIGGER"
+    | "IN_TRADE";
+  lastCandleTs: string | null;
+  lastFSHPrice: number | null;
+  lastFSLPrice: number | null;
+  anchorLine: number | null;
+  anchorIndex: number | null;
+  causalExtreme: number | null;
+  causalExtremeIndex: number | null;
+  midpointLevel: number | null;
+  impulsePips: number | null;
+  pullbackStartIndex: number | null;
+  pullbackConfirmIndex: number | null;
+  pbLow: number | null;
+  pbHigh: number | null;
+  sLow: number | null;
+  sHigh: number | null;
+  activeTradeKey: string | null;
+};
+
+export type EngineEvent =
+  | {
+    type: "STRUCTURE_FLIP";
+    at: string;
+    from: "BEARISH" | "BULLISH";
+    to: "BEARISH" | "BULLISH";
+    reason: string;
+  }
+  | {
+    type: "CYCLE_DISCARDED";
+    at: string;
+    direction: "LONG" | "SHORT";
+    impulsePips: number;
+    minImpulsePips: number;
+  };

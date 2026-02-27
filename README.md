@@ -15,6 +15,8 @@ This repo scaffolds a full Supabase-based signal engine for the EUR/USD M15 cont
 - `supabase/migrations/20260224000001_init_signal_system.sql` - DB schema + cron helper
 - `supabase/migrations/20260224000002_broker_execution_queue.sql` - cTrader broker order queue
 - `supabase/migrations/20260224000003_render_executor_ping_helpers.sql` - optional Render keep-warm/tick cron helpers
+- `supabase/migrations/20260224000004_runtime_state_and_telegram_ui.sql` - runtime state + controls + telegram lifecycle fields
+- `supabase/functions/telegram-bot/index.ts` - Telegram webhook command UI (`/menu`, `/status`, `/analysis`, ...)
 - `executor-server/src/server.js` - Node executor service (polls queue and submits to cTrader Open API)
 - `supabase/.env.example` - Supabase Edge Function secrets/template
 - `executor-server/.env.example` - Render Node executor env template
@@ -23,9 +25,10 @@ This repo scaffolds a full Supabase-based signal engine for the EUR/USD M15 cont
 
 1. Create a Supabase project.
 2. Set Supabase Edge Function secrets from `supabase/.env.example`.
-3. Run the SQL migrations (`000001`, `000002`, and optional `000003` if using Render keep-warm/tick cron helpers).
+3. Run the SQL migrations (`000001`, `000002`, optional `000003`, and `000004`).
 4. Deploy the function:
    - `supabase functions deploy m15-signal-engine --no-verify-jwt`
+   - `supabase functions deploy telegram-bot --no-verify-jwt`
 5. Configure Render web service env from `executor-server/.env.example`, then start the executor server:
    - `cd executor-server && npm install && npm start`
 6. Create the main signal cron job with SQL (see `000001` migration comments).
@@ -35,12 +38,15 @@ This repo scaffolds a full Supabase-based signal engine for the EUR/USD M15 cont
 
 - The implementation uses confirmed 3-candle fractals and close-only breaks.
 - Entry is modeled at the next candle open; if the next candle is not available yet, the signal is stored and notified as `pending_next_open`.
-- Swing A/B anchors are inferred from the latest confirmed fractal high/low (same TF) in `WAIT_SWING_BOS`.
+- Invalidation now flips bias deterministically (invalidation = opposite BOS) instead of just resetting.
 - The edge function now queues `known_next_open` signals into `broker_order_requests`, and optionally POSTs `EXECUTOR_BASE_URL/webhook/queued`.
+- Runtime snapshot is persisted in `strategy_runtime_state` each run and exposed by Telegram `/status` + `/analysis`.
+- `/reset_cycle` is implemented via `strategy_controls.reset_requested`.
 
 ## cTrader executor notes
 
 - Set `CTRADER_*` env vars for the Node server (see `executor-server/.env.example`).
+- Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in Render env for trade execution notifications.
 - `CTRADER_SYMBOL_ID` is broker-specific. You must use the cTrader symbol ID for EURUSD on your account/broker.
 - The Node service can now size positions by risk (`CTRADER_POSITION_SIZING_MODE=risk_percent`) using cTrader account snapshot figures at execution time.
 - In `risk_percent` mode, it enforces a strict pre-trade cap by rounding volume down so projected loss at SL is `<= CTRADER_RISK_PERCENT` (default `1%`) before submit.
@@ -48,6 +54,18 @@ This repo scaffolds a full Supabase-based signal engine for the EUR/USD M15 cont
 - `fixed` mode is still available via `CTRADER_POSITION_SIZING_MODE=fixed`, which uses queued `requested_units` / `CTRADER_ORDER_VOLUME_UNITS`.
 - cTrader access tokens expire. This scaffold expects a valid `CTRADER_ACCESS_TOKEN`; add a refresh flow if you want unattended token rotation.
 - Risk conversion support in this scaffold is strict and limited to `EURUSD` with account currency `USD` or `EUR`. Other symbols/currencies should fail closed until conversion logic is added.
+- Executor sends `🚀 Trade Executed` notifications on successful order submission; TP/SL close notifications are sent by `m15-signal-engine` from closed `strategy_trades`.
+
+## Telegram Bot UI
+
+- Configure Supabase function secrets from `supabase/.env.example`, including:
+  - `TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated chat id allowlist)
+  - `TELEGRAM_WEBHOOK_SECRET`
+- Deploy `telegram-bot` function and set Telegram webhook to `https://<project-ref>.functions.supabase.co/telegram-bot`
+- Set Telegram webhook secret token (Telegram sends it as `X-Telegram-Bot-Api-Secret-Token`):
+  - `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<project-ref>.functions.supabase.co/telegram-bot&secret_token=<TELEGRAM_WEBHOOK_SECRET>`
+- Supported commands/buttons:
+  - `/menu`, `/status`, `/analysis`, `/trade`, `/last_signal`, `/daily`, `/weekly`, `/debug`, `/reset_cycle`
 
 ## Vercel + Render separation
 
