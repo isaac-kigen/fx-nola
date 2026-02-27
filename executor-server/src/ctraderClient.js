@@ -63,6 +63,7 @@ export class CTraderOpenApiClient {
     this.pending = new Map();
     this.heartbeatTimer = null;
     this.symbolMap = null;
+    this.executionListeners = new Set();
   }
 
   async ensureReady() {
@@ -199,7 +200,31 @@ export class CTraderOpenApiClient {
         return;
       }
       pending.resolve(msg);
+      if (msg.payloadType === PT.EXECUTION_EVENT) {
+        this.emitExecutionEvent(msg);
+      }
       return;
+    }
+
+    if (msg.payloadType === PT.EXECUTION_EVENT) {
+      this.emitExecutionEvent(msg);
+    }
+  }
+
+  onExecutionEvent(listener) {
+    this.executionListeners.add(listener);
+    return () => {
+      this.executionListeners.delete(listener);
+    };
+  }
+
+  emitExecutionEvent(msg) {
+    for (const listener of this.executionListeners) {
+      try {
+        listener(msg);
+      } catch {
+        // ignore listener failures
+      }
     }
   }
 

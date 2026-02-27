@@ -124,6 +124,52 @@ async function sendTelegram(config, text) {
   return res.ok;
 }
 
+function extractEventField(payload, path) {
+  let cur = payload;
+  for (const k of path) {
+    if (!cur || typeof cur !== "object") return null;
+    cur = cur[k];
+  }
+  return cur ?? null;
+}
+
+function eventTimestamp(payload) {
+  const tsRaw = extractEventField(payload, ["utcLastUpdateTimestamp"]) ??
+    extractEventField(payload, ["deal", "utcTimestamp"]) ??
+    extractEventField(payload, ["executionTimestamp"]);
+  if (tsRaw == null) return nowIso();
+  const n = Number(tsRaw);
+  if (Number.isFinite(n) && n > 0) {
+    // cTrader often uses ms unix timestamp
+    return new Date(n).toISOString();
+  }
+  const s = String(tsRaw);
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? nowIso() : d.toISOString();
+}
+
+function detectCloseReason(payload) {
+  const raw = JSON.stringify(payload).toUpperCase();
+  if (raw.includes("TAKE_PROFIT")) return "TP";
+  if (raw.includes("STOP_LOSS")) return "SL";
+  return null;
+}
+
+function eventSignature(event) {
+  const p = event.payload ?? event;
+  const positionId = extractEventField(p, ["position", "positionId"]) ??
+    extractEventField(p, ["closedPosition", "positionId"]) ??
+    extractEventField(p, ["positionId"]) ??
+    "";
+  const orderId = extractEventField(p, ["order", "orderId"]) ??
+    extractEventField(p, ["orderId"]) ??
+    "";
+  const executionType = extractEventField(p, ["executionType"]) ?? "";
+  const uts = extractEventField(p, ["utcLastUpdateTimestamp"]) ??
+    extractEventField(p, ["deal", "utcTimestamp"]) ?? "";
+  return `${event.payloadType}:${executionType}:${positionId}:${orderId}:${uts}`;
+}
+
 export class BrokerExecutor {
   constructor({ supabase, ctraderClient, config }) {
     this.supabase = supabase;
@@ -131,10 +177,16 @@ export class BrokerExecutor {
     this.config = config;
     this.timer = null;
     this.running = false;
+    this.unsubscribeExecution = null;
   }
 
   start() {
     if (this.timer) return;
+    if (!this.unsubscribeExecution) {
+      this.unsubscribeExecution = this.ctraderClient.onExecutionEvent((event) => {
+        this.handleExecutionEvent(event).catch((e) => err("execution event handler failed", e));
+      });
+    }
     this.timer = setInterval(() => {
       this.tick().catch((e) => err("executor tick failed", e));
     }, this.config.pollIntervalMs);
@@ -144,6 +196,101 @@ export class BrokerExecutor {
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.unsubscribeExecution) {
+      this.unsubscribeExecution();
+      this.unsubscribeExecution = null;
+    }
+  }
+
+  async handleExecutionEvent(event) {
+    const payload = event.payload ?? event;
+    const signature = eventSignature(event);
+    const receivedAt = nowIso();
+    const closeReason = detectCloseReason(payload);
+    const positionId = extractEventField(payload, ["position", "positionId"]) ??
+      extractEventField(payload, ["closedPosition", "positionId"]) ??
+      extractEventField(payload, ["positionId"]);
+    const orderId = extractEventField(payload, ["order", "orderId"]) ??
+      extractEventField(payload, ["orderId"]);
+    const executionType = extractEventField(payload, ["executionType"]);
+    const eventTs = eventTimestamp(payload);
+
+    const eventInsert = await this.supabase
+      .from("broker_execution_events")
+      .upsert({
+        event_signature: signature,
+        payload_type: Number(event.payloadType ?? 0),
+        execution_type: executionType == null ? null : String(executionType),
+        broker_position_id: positionId == null ? null : String(positionId),
+        broker_order_id: orderId == null ? null : String(orderId),
+        close_reason: closeReason,
+        event_time: eventTs,
+        received_at: receivedAt,
+        payload,
+      }, { onConflict: "event_signature" })
+      .select("id")
+      .limit(1);
+    if (eventInsert.error) throw eventInsert.error;
+
+    if (closeReason == null) return;
+
+    let reqQuery = this.supabase
+      .from("broker_order_requests")
+      .select("*")
+      .eq("broker", "ctrader")
+      .in("status", ["accepted", "submitted", "processing", "failed", "queued"])
+      .order("updated_at", { ascending: false })
+      .limit(1);
+    if (positionId != null) reqQuery = reqQuery.eq("broker_position_id", String(positionId));
+    else if (orderId != null) reqQuery = reqQuery.eq("broker_order_id", String(orderId));
+    else return;
+
+    const reqRes = await reqQuery;
+    if (reqRes.error) throw reqRes.error;
+    const req = reqRes.data?.[0];
+    if (!req) return;
+
+    const exitPrice = extractEventField(payload, ["deal", "executionPrice"]) ??
+      extractEventField(payload, ["executionPrice"]) ??
+      extractEventField(payload, ["closePrice"]);
+    const exitPxNum = exitPrice == null ? null : Number(exitPrice);
+
+    const tradeUpdate = await this.supabase
+      .from("strategy_trades")
+      .update({
+        status: "CLOSED",
+        exit_reason: closeReason,
+        exit_time: eventTs,
+        exit_price: Number.isFinite(exitPxNum) ? exitPxNum : null,
+      })
+      .eq("signal_key", req.signal_key)
+      .eq("status", "OPEN");
+    if (tradeUpdate.error) throw tradeUpdate.error;
+
+    const text = closeReason === "TP"
+      ? [
+        `🎯 *Trade Closed (TP)*`,
+        `Signal ID: \`${req.signal_key}\``,
+        `Position: \`${positionId ?? "-"}\``,
+        `Exit Price: \`${Number.isFinite(exitPxNum) ? exitPxNum : "-"}\``,
+        `Time: \`${eventTs}\``,
+      ].join("\n")
+      : [
+        `🛑 *Trade Closed (SL)*`,
+        `Signal ID: \`${req.signal_key}\``,
+        `Position: \`${positionId ?? "-"}\``,
+        `Exit Price: \`${Number.isFinite(exitPxNum) ? exitPxNum : "-"}\``,
+        `Time: \`${eventTs}\``,
+      ].join("\n");
+
+    const closeTgSent = await sendTelegram(this.config, text);
+    if (closeTgSent) {
+      await this.supabase
+        .from("strategy_trades")
+        .update({ telegram_close_notified_at: nowIso() })
+        .eq("signal_key", req.signal_key)
+        .eq("status", "CLOSED");
+    }
   }
 
   async tick() {

@@ -16,6 +16,7 @@ This repo scaffolds a full Supabase-based signal engine for the EUR/USD M15 cont
 - `supabase/migrations/20260224000002_broker_execution_queue.sql` - cTrader broker order queue
 - `supabase/migrations/20260224000003_render_executor_ping_helpers.sql` - optional Render keep-warm/tick cron helpers
 - `supabase/migrations/20260224000004_runtime_state_and_telegram_ui.sql` - runtime state + controls + telegram lifecycle fields
+- `supabase/migrations/20260224000005_broker_execution_events.sql` - persisted cTrader execution events for broker-driven close detection
 - `supabase/functions/telegram-bot/index.ts` - Telegram webhook command UI (`/menu`, `/status`, `/analysis`, ...)
 - `executor-server/src/server.js` - Node executor service (polls queue and submits to cTrader Open API)
 - `supabase/.env.example` - Supabase Edge Function secrets/template
@@ -25,7 +26,7 @@ This repo scaffolds a full Supabase-based signal engine for the EUR/USD M15 cont
 
 1. Create a Supabase project.
 2. Set Supabase Edge Function secrets from `supabase/.env.example`.
-3. Run the SQL migrations (`000001`, `000002`, optional `000003`, and `000004`).
+3. Run the SQL migrations (`000001`, `000002`, optional `000003`, `000004`, and `000005`).
 4. Deploy the function:
    - `supabase functions deploy m15-signal-engine --no-verify-jwt`
    - `supabase functions deploy telegram-bot --no-verify-jwt`
@@ -54,7 +55,9 @@ This repo scaffolds a full Supabase-based signal engine for the EUR/USD M15 cont
 - `fixed` mode is still available via `CTRADER_POSITION_SIZING_MODE=fixed`, which uses queued `requested_units` / `CTRADER_ORDER_VOLUME_UNITS`.
 - cTrader access tokens expire. This scaffold expects a valid `CTRADER_ACCESS_TOKEN`; add a refresh flow if you want unattended token rotation.
 - Risk conversion support in this scaffold is strict and limited to `EURUSD` with account currency `USD` or `EUR`. Other symbols/currencies should fail closed until conversion logic is added.
-- Executor sends `🚀 Trade Executed` notifications on successful order submission; TP/SL close notifications are sent by `m15-signal-engine` from closed `strategy_trades`.
+- Executor sends `🚀 Trade Executed` notifications on successful order submission.
+- Executor now listens to broker execution events and sends broker-driven TP/SL close notifications when close reason is identifiable from cTrader payload.
+- `m15-signal-engine` still emits TP/SL close notifications from `strategy_trades` as a fallback path.
 
 ## Telegram Bot UI
 
