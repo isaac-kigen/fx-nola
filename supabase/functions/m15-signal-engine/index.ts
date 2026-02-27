@@ -6,6 +6,7 @@ import { sendTelegramMessage } from "../_shared/telegram.ts";
 import {
   formatCycleDiscarded,
   formatSignalDetected,
+  formatSignalArmed,
   formatStructureFlip,
   formatTradeClosedSL,
   formatTradeClosedTP,
@@ -323,6 +324,20 @@ serve(async (req) => {
           signalKey: String(s.signal_key),
         }),
       });
+      if (s.entry_status === "pending_next_open") {
+        await sendTelegramMessage({
+          botToken: env.telegramBotToken,
+          chatId: env.telegramChatId,
+          text: formatSignalArmed({
+            direction: String(s.direction) as "LONG" | "SHORT",
+            symbol: String(s.symbol),
+            timeframe: String(s.timeframe),
+            stopLoss: Number(s.stop_loss),
+            takeProfit: Number(s.take_profit),
+            signalKey: String(s.signal_key),
+          }),
+        });
+      }
       const { error } = await supabase
         .from("strategy_signals")
         .update({ telegram_notified_at: new Date().toISOString(), status: "notified" })

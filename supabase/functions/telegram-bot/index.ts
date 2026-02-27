@@ -8,6 +8,8 @@ import {
   formatDailyReport,
   formatDataWarning,
   formatDebugSnapshot,
+  formatMenu,
+  formatResetCycleAck,
   formatStatus,
   formatUnauthorized,
   formatWeeklyReport,
@@ -123,19 +125,59 @@ serve(async (req) => {
     };
 
     const sendStatus = async () => {
-      const { data, error } = await supabase
+      const runtimeRes = await supabase
         .from("strategy_runtime_state")
         .select("*")
         .eq("strategy_code", STRATEGY_CODE)
         .eq("symbol", env.signalSymbol)
         .eq("timeframe", env.signalTimeframe)
         .maybeSingle();
-      if (error) throw error;
-      if (!data) {
+      if (runtimeRes.error) throw runtimeRes.error;
+      if (!runtimeRes.data) {
         await send(formatDataWarning("No runtime state available yet."));
         return;
       }
-      await send(formatStatus(toRuntimeSnapshot(data as Record<string, unknown>)));
+      const runtime = toRuntimeSnapshot(runtimeRes.data as Record<string, unknown>);
+      const candleRes = await supabase
+        .from("market_candles")
+        .select("ts,open,high,low,close")
+        .eq("symbol", env.signalSymbol)
+        .eq("timeframe", env.signalTimeframe)
+        .order("ts", { ascending: false })
+        .limit(1);
+      if (candleRes.error) throw candleRes.error;
+
+      const signalRes = await supabase
+        .from("strategy_signals")
+        .select("signal_key")
+        .eq("symbol", env.signalSymbol)
+        .eq("timeframe", env.signalTimeframe)
+        .order("trigger_time", { ascending: false })
+        .limit(1);
+      if (signalRes.error) throw signalRes.error;
+
+      const openTradeRes = await supabase
+        .from("strategy_trades")
+        .select("trade_key")
+        .eq("symbol", env.signalSymbol)
+        .eq("timeframe", env.signalTimeframe)
+        .eq("status", "OPEN")
+        .limit(1);
+      if (openTradeRes.error) throw openTradeRes.error;
+
+      const c = candleRes.data?.[0];
+      await send(formatStatus({
+        runtime,
+        lastCandle: {
+          ts: c?.ts ? String(c.ts) : runtime.lastCandleTs,
+          open: c?.open == null ? null : Number(c.open),
+          high: c?.high == null ? null : Number(c.high),
+          low: c?.low == null ? null : Number(c.low),
+          close: c?.close == null ? null : Number(c.close),
+        },
+        lastSignalKey: signalRes.data?.[0]?.signal_key ? String(signalRes.data[0].signal_key) : null,
+        hasOpenTrade: (openTradeRes.data?.length ?? 0) > 0,
+      }));
     };
 
     const sendAnalysis = async () => {
@@ -194,13 +236,16 @@ serve(async (req) => {
       }
       const t = data[0];
       await send([
-        `📌 *Trade/Broker Status*`,
-        `Request: \`${t.request_key}\``,
-        `Direction: *${t.direction}*`,
-        `Status: \`${t.status}\``,
-        `Order/Position: \`${t.broker_order_id ?? "-"}\` / \`${t.broker_position_id ?? "-"}\``,
-        `Last Error: \`${t.broker_error_message ?? "-"}\``,
-        `Updated: \`${t.updated_at}\``,
+        `🚀 *NOLA-DELTA • OPEN TRADE*`,
+        `EURUSD • M15 • ${t.updated_at}`,
+        ``,
+        `${t.direction === "LONG" ? "🟢" : "🔴"} ${t.direction} @ ${t.planned_entry_price ?? "-"}`,
+        `🛑 SL: ${t.stop_loss}`,
+        `🎯 TP: ${t.take_profit}`,
+        ``,
+        `📍 Status: ${t.status}`,
+        `📌 Order/Position: ${t.broker_order_id ?? "-"} / ${t.broker_position_id ?? "-"}`,
+        `🧾 ID: ${t.signal_key}`,
       ].join("\n"));
     };
 
@@ -208,42 +253,28 @@ serve(async (req) => {
       const now = new Date();
       const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
 
-      const signalsRes = await supabase
-        .from("strategy_signals")
-        .select("id", { count: "exact", head: true })
-        .eq("symbol", env.signalSymbol)
-        .eq("timeframe", env.signalTimeframe)
-        .gte("trigger_time", dayStart);
-      const executedRes = await supabase
-        .from("broker_order_requests")
-        .select("id", { count: "exact", head: true })
-        .in("status", ["accepted", "submitted"])
-        .eq("symbol", env.signalSymbol)
-        .eq("timeframe", env.signalTimeframe)
-        .gte("created_at", dayStart);
-      const tpRes = await supabase
+      const tradesRes = await supabase
         .from("strategy_trades")
-        .select("id", { count: "exact", head: true })
-        .eq("status", "CLOSED")
-        .eq("exit_reason", "TP")
+        .select("exit_reason,r_multiple,status,updated_at")
         .eq("symbol", env.signalSymbol)
         .eq("timeframe", env.signalTimeframe)
         .gte("updated_at", dayStart);
-      const slRes = await supabase
-        .from("strategy_trades")
-        .select("id", { count: "exact", head: true })
-        .eq("status", "CLOSED")
-        .eq("exit_reason", "SL")
-        .eq("symbol", env.signalSymbol)
-        .eq("timeframe", env.signalTimeframe)
-        .gte("updated_at", dayStart);
+      if (tradesRes.error) throw tradesRes.error;
+
+      const closed = (tradesRes.data ?? []).filter((t) => t.status === "CLOSED");
+      const wins = closed.filter((t) => t.exit_reason === "TP").length;
+      const losses = closed.filter((t) => t.exit_reason === "SL").length;
+      const trades = closed.length;
+      const netR = closed.reduce((acc, t) => acc + (t.r_multiple == null ? 0 : Number(t.r_multiple)), 0);
+      const winRatePct = trades > 0 ? (wins / trades) * 100 : 0;
 
       await send(formatDailyReport({
         date: dayStart.slice(0, 10),
-        signals: signalsRes.count ?? 0,
-        executed: executedRes.count ?? 0,
-        tp: tpRes.count ?? 0,
-        sl: slRes.count ?? 0,
+        trades,
+        wins,
+        losses,
+        winRatePct,
+        netR,
       }));
     };
 
@@ -254,72 +285,43 @@ serve(async (req) => {
       const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - diffToMonday));
       const weekStart = monday.toISOString();
 
-      const signalsRes = await supabase
-        .from("strategy_signals")
-        .select("id", { count: "exact", head: true })
-        .eq("symbol", env.signalSymbol)
-        .eq("timeframe", env.signalTimeframe)
-        .gte("trigger_time", weekStart);
-      const executedRes = await supabase
-        .from("broker_order_requests")
-        .select("id", { count: "exact", head: true })
-        .in("status", ["accepted", "submitted"])
-        .eq("symbol", env.signalSymbol)
-        .eq("timeframe", env.signalTimeframe)
-        .gte("created_at", weekStart);
-      const tpRes = await supabase
+      const tradesRes = await supabase
         .from("strategy_trades")
-        .select("id", { count: "exact", head: true })
-        .eq("status", "CLOSED")
-        .eq("exit_reason", "TP")
+        .select("exit_reason,r_multiple,status,updated_at")
         .eq("symbol", env.signalSymbol)
         .eq("timeframe", env.signalTimeframe)
         .gte("updated_at", weekStart);
-      const slRes = await supabase
-        .from("strategy_trades")
-        .select("id", { count: "exact", head: true })
-        .eq("status", "CLOSED")
-        .eq("exit_reason", "SL")
-        .eq("symbol", env.signalSymbol)
-        .eq("timeframe", env.signalTimeframe)
-        .gte("updated_at", weekStart);
+      if (tradesRes.error) throw tradesRes.error;
+
+      const closed = (tradesRes.data ?? []).filter((t) => t.status === "CLOSED");
+      const wins = closed.filter((t) => t.exit_reason === "TP").length;
+      const losses = closed.filter((t) => t.exit_reason === "SL").length;
+      const trades = closed.length;
+      const netR = closed.reduce((acc, t) => acc + (t.r_multiple == null ? 0 : Number(t.r_multiple)), 0);
+      const winRatePct = trades > 0 ? (wins / trades) * 100 : 0;
 
       await send(formatWeeklyReport({
         weekStart: weekStart.slice(0, 10),
-        signals: signalsRes.count ?? 0,
-        executed: executedRes.count ?? 0,
-        tp: tpRes.count ?? 0,
-        sl: slRes.count ?? 0,
+        trades,
+        wins,
+        losses,
+        winRatePct,
+        netR,
       }));
     };
 
     const sendDebug = async () => {
       const runtime = await supabase
         .from("strategy_runtime_state")
-        .select("updated_at")
+        .select("*")
         .eq("strategy_code", STRATEGY_CODE)
         .eq("symbol", env.signalSymbol)
         .eq("timeframe", env.signalTimeframe)
         .maybeSingle();
-      const signal = await supabase
-        .from("strategy_signals")
-        .select("signal_key")
-        .eq("symbol", env.signalSymbol)
-        .eq("timeframe", env.signalTimeframe)
-        .order("trigger_time", { ascending: false })
-        .limit(1);
-      const reqStatus = await supabase
-        .from("broker_order_requests")
-        .select("status")
-        .eq("symbol", env.signalSymbol)
-        .eq("timeframe", env.signalTimeframe)
-        .order("updated_at", { ascending: false })
-        .limit(1);
+      if (runtime.error) throw runtime.error;
 
       await send(formatDebugSnapshot({
-        runtimeUpdatedAt: runtime.data?.updated_at ? String(runtime.data.updated_at) : null,
-        lastSignalKey: signal.data?.[0]?.signal_key ? String(signal.data[0].signal_key) : null,
-        lastOrderRequestStatus: reqStatus.data?.[0]?.status ? String(reqStatus.data[0].status) : null,
+        runtime: runtime.data ? toRuntimeSnapshot(runtime.data as Record<string, unknown>) : null,
       }));
     };
 
@@ -333,7 +335,7 @@ serve(async (req) => {
           reset_requested: true,
         }, { onConflict: "strategy_code,symbol,timeframe" });
       if (error) throw error;
-      await send("✅ Reset cycle requested. Engine will apply on next run.");
+      await send(formatResetCycleAck());
     };
 
     switch (command) {
@@ -342,7 +344,7 @@ serve(async (req) => {
         await sendTelegramMessage({
           botToken: env.telegramBotToken,
           chatId,
-          text: `*Menu*\nChoose an action.`,
+          text: formatMenu(env.signalSymbol, env.signalTimeframe),
           replyMarkup: menuKeyboard(),
         });
         break;

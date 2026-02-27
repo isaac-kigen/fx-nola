@@ -269,18 +269,22 @@ export class BrokerExecutor {
 
     const text = closeReason === "TP"
       ? [
-        `🎯 *Trade Closed (TP)*`,
-        `Signal ID: \`${req.signal_key}\``,
-        `Position: \`${positionId ?? "-"}\``,
-        `Exit Price: \`${Number.isFinite(exitPxNum) ? exitPxNum : "-"}\``,
-        `Time: \`${eventTs}\``,
+        `🎯 *NOLA-DELTA • ${req.symbol} • ${req.timeframe}*`,
+        `📌 TAKE PROFIT HIT`,
+        ``,
+        `${req.direction === "LONG" ? "🟢" : "🔴"} ${req.direction} Closed @ ${Number.isFinite(exitPxNum) ? exitPxNum : "-"}`,
+        `⏱️ Time: ${eventTs}`,
+        ``,
+        `🧾 ID: ${req.signal_key}`,
       ].join("\n")
       : [
-        `🛑 *Trade Closed (SL)*`,
-        `Signal ID: \`${req.signal_key}\``,
-        `Position: \`${positionId ?? "-"}\``,
-        `Exit Price: \`${Number.isFinite(exitPxNum) ? exitPxNum : "-"}\``,
-        `Time: \`${eventTs}\``,
+        `🛑 *NOLA-DELTA • ${req.symbol} • ${req.timeframe}*`,
+        `📌 STOP LOSS HIT`,
+        ``,
+        `${req.direction === "LONG" ? "🟢" : "🔴"} ${req.direction} Closed @ ${Number.isFinite(exitPxNum) ? exitPxNum : "-"}`,
+        `⏱️ Time: ${eventTs}`,
+        ``,
+        `🧾 ID: ${req.signal_key}`,
       ].join("\n");
 
     const closeTgSent = await sendTelegram(this.config, text);
@@ -426,13 +430,25 @@ export class BrokerExecutor {
         relativeTakeProfit: outcome.relativeTakeProfit ?? null,
       });
 
+      const plannedEntry = Number(req.planned_entry_price);
+      const stopLoss = Number(req.stop_loss);
+      const takeProfit = Number(req.take_profit);
+      const riskAbs = Number.isFinite(plannedEntry) ? Math.abs(plannedEntry - stopLoss) : NaN;
+      const rewardAbs = Number.isFinite(plannedEntry) ? Math.abs(takeProfit - plannedEntry) : NaN;
+      const rr = riskAbs > 0 ? (rewardAbs / riskAbs) : NaN;
+
       const tgSent = await sendTelegram(this.config, [
-        `🚀 *Trade Executed*`,
-        `Direction: *${req.direction}*`,
-        `Entry: \`${req.planned_entry_price ?? "-"}\``,
-        `SL/TP: \`${req.stop_loss}\` / \`${req.take_profit}\``,
-        `Order/Position: \`${outcome.orderId ?? "-"}\` / \`${outcome.positionId ?? "-"}\``,
-        `Signal ID: \`${req.signal_key}\``,
+        `🚀 *NOLA-DELTA • ${req.symbol} • ${req.timeframe}*`,
+        `📌 TRADE EXECUTED`,
+        ``,
+        `${req.direction === "LONG" ? "🟢" : "🔴"} ${req.direction} @ ${req.planned_entry_price ?? "-"}`,
+        `🛑 SL: ${req.stop_loss}`,
+        `🎯 TP: ${req.take_profit}`,
+        ``,
+        `📏 Risk: ${Number.isFinite(riskAbs) ? riskAbs.toFixed(5) : "-"}`,
+        `📐 R:R: ${Number.isFinite(rr) ? `1 : ${rr.toFixed(2)}` : "-"}`,
+        ``,
+        `🧾 ID: ${req.signal_key}`,
       ].join("\n"));
       if (tgSent) {
         await this.supabase
